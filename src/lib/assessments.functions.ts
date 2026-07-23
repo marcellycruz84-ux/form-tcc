@@ -112,7 +112,7 @@ export const getAssessment = createServerFn({ method: "POST" })
     if (error) throw new Error(error.message);
 
     const instrumentId = a.instrument?.id;
-    const [{ data: patientRow }, { data: cutoffs }, { data: domains }, { data: rule }] = await Promise.all([
+    const [{ data: patientRow }, { data: cutoffs }, { data: domains }, { data: rule }, { data: questions }, { data: answers }, { data: options }] = await Promise.all([
       supabase.from("patients").select("id, pii_encrypted").eq("id", a.patient_id).single(),
       instrumentId
         ? supabase.from("cutoffs").select("min_score, max_score, classification, message, domain_id").eq("instrument_id", instrumentId)
@@ -123,6 +123,13 @@ export const getAssessment = createServerFn({ method: "POST" })
       instrumentId
         ? supabase.from("scoring_rules").select("aggregation, min_value, max_value, transform").eq("instrument_id", instrumentId).single()
         : Promise.resolve({ data: null }),
+      instrumentId
+        ? supabase.from("questions").select("id, ordinal, text, domain_id").eq("instrument_id", instrumentId).order("ordinal")
+        : Promise.resolve({ data: [] as never[] }),
+      supabase.from("answers").select("question_id, option_id").eq("assessment_id", data.assessment_id),
+      instrumentId
+        ? supabase.from("options").select("id, label").eq("instrument_id", instrumentId)
+        : Promise.resolve({ data: [] as never[] }),
     ]);
 
     const { decryptPII } = await loadCrypto();
@@ -137,6 +144,18 @@ export const getAssessment = createServerFn({ method: "POST" })
       cutoffs: (cutoffs ?? []) as Array<{ min_score: number; max_score: number; classification: string; message: string; domain_id: string | null }>,
       domains: (domains ?? []) as Array<{ id: string; code: string; name: string }>,
       rule: rule ?? null,
+      response_details: (questions ?? []).map((question) => {
+        const answer = (answers ?? []).find((item) => item.question_id === question.id);
+        const option = (options ?? []).find((item) => item.id === answer?.option_id);
+        const domain = (domains ?? []).find((item) => item.id === question.domain_id);
+        return {
+          ordinal: question.ordinal,
+          question: question.text,
+          answer: option?.label ?? "Não respondida",
+          domain_id: question.domain_id,
+          domain_name: domain?.name ?? null,
+        };
+      }),
     };
   });
 

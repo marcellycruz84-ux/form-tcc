@@ -41,9 +41,15 @@ export interface AnswerInput {
 }
 
 export interface ScoreResult {
-  raw_scores: Record<string, number>;      // per question ordinal → applied weight (post-inversion)
+  raw_scores: Record<string, number>; // per question ordinal → applied weight (post-inversion)
   computed: { total?: number; by_domain?: Record<string, number> };
-  cutoff_hits: Array<{ scope: "total" | "domain"; domain_id?: string; classification: string; message: string; score: number }>;
+  cutoff_hits: Array<{
+    scope: "total" | "domain";
+    domain_id?: string;
+    classification: string;
+    message: string;
+    score: number;
+  }>;
   flags: string[];
   answered: number;
   total_questions: number;
@@ -68,9 +74,16 @@ export function computeScore(inst: EngineInstrument, answers: AnswerInput[]): Sc
     const q = qById.get(a.question_id);
     const o = optById.get(a.option_id);
     if (!q || !o) continue;
-    const applied = applyInversion(o.weight, q.is_inverted, inst.rule.min_value, inst.rule.max_value);
+    const applied = applyInversion(
+      o.weight,
+      q.is_inverted,
+      inst.rule.min_value,
+      inst.rule.max_value,
+    );
     raw_scores[q.ordinal] = applied;
-    total += applied;
+    const isOfficialGadItem = inst.code !== "GAD-7" || q.ordinal <= 7;
+    const isOfficialPhqItem = inst.code !== "PHQ-9" || q.ordinal <= 9;
+    if (isOfficialGadItem && isOfficialPhqItem) total += applied;
     if (q.domain_id) {
       (perDomain[q.domain_id] ||= []).push(applied);
     }
@@ -87,7 +100,12 @@ export function computeScore(inst: EngineInstrument, answers: AnswerInput[]): Sc
     computed.total = total;
     for (const c of inst.cutoffs) {
       if (total >= c.min_score && total <= c.max_score) {
-        cutoff_hits.push({ scope: "total", classification: c.classification, message: c.message, score: total });
+        cutoff_hits.push({
+          scope: "total",
+          classification: c.classification,
+          message: c.message,
+          score: total,
+        });
       }
     }
   } else if (inst.rule.aggregation === "MEAN") {
@@ -96,7 +114,12 @@ export function computeScore(inst: EngineInstrument, answers: AnswerInput[]): Sc
     computed.total = mean;
     for (const c of inst.cutoffs) {
       if (mean >= c.min_score && mean <= c.max_score) {
-        cutoff_hits.push({ scope: "total", classification: c.classification, message: c.message, score: mean });
+        cutoff_hits.push({
+          scope: "total",
+          classification: c.classification,
+          message: c.message,
+          score: mean,
+        });
       }
     }
   } else if (inst.rule.aggregation === "SUM_BY_DOMAIN") {
@@ -115,7 +138,13 @@ export function computeScore(inst: EngineInstrument, answers: AnswerInput[]): Sc
       by[domainId] = value;
       for (const c of inst.cutoffs.filter((x) => x.domain_id === domainId)) {
         if (value >= c.min_score && value <= c.max_score) {
-          cutoff_hits.push({ scope: "domain", domain_id: domainId, classification: c.classification, message: c.message, score: value });
+          cutoff_hits.push({
+            scope: "domain",
+            domain_id: domainId,
+            classification: c.classification,
+            message: c.message,
+            score: value,
+          });
         }
       }
     }

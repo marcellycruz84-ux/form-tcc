@@ -21,6 +21,7 @@ type Rule = { aggregation: string; min_value: number; max_value: number; transfo
 type Cutoff = { min_score: number; max_score: number; classification: string; message: string; domain_id: string | null };
 type Domain = { id: string; code: string; name: string };
 type CutoffHit = { scope?: "total" | "domain"; domain_id?: string; classification: string; message: string; score: number };
+type ResponseDetail = { ordinal: number; question: string; answer: string; domain_id: string | null; domain_name: string | null };
 
 function AssessmentDetail() {
   const { id } = Route.useParams();
@@ -56,6 +57,7 @@ function AssessmentDetail() {
   const cutoffs = ((a?.cutoffs as Cutoff[] | undefined) ?? []);
   const domains = ((a?.domains as Domain[] | undefined) ?? []);
   const isWhoqol = a?.instrument?.code === "WHOQOL-BREF";
+  const responseDetails = ((a?.response_details as ResponseDetail[] | undefined) ?? []);
   const domainMax = computed.by_domain ? Object.keys(computed.by_domain).length * (rule?.max_value ?? 5) : 0;
 
   // Máximo do escore total para SUM (não-WHOQOL) - soma o max de cada cutoff cobrindo a faixa.
@@ -172,34 +174,12 @@ function AssessmentDetail() {
                 </div>
               )}
 
-              {/* Escore total + classificação + mensagem */}
-              {typeof total === "number" && (
+              {/* Síntese interpretativa sem destacar a pontuação numérica. */}
+              {totalHit && !isWhoqol && (
                 <section className="rounded-lg border border-border bg-background p-6">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Pontuação total</p>
-                  <div className="mt-1 flex items-baseline gap-3">
-                    <p className="text-4xl font-semibold tracking-tight">{formatScore(total)}</p>
-                    {rule && (
-                      <p className="text-sm text-muted-foreground">
-                        de {isWhoqol ? "0–100 por domínio" : `${rule.min_value * (a.instrument?.code === "GAD-7" ? 7 : a.instrument?.code === "PHQ-9" ? 9 : 1)}–${rule.max_value * (a.instrument?.code === "GAD-7" ? 7 : a.instrument?.code === "PHQ-9" ? 9 : 1)}`}
-                      </p>
-                    )}
-                  </div>
-                  {totalHit && (
-                    <>
-                      <p className="mt-3 text-base font-medium">{totalHit.classification}</p>
-                      <p className="mt-1 text-sm text-muted-foreground">{totalHit.message}</p>
-                    </>
-                  )}
-
-                  {/* B2 - barra de faixa com cut-offs (só para SUM total) */}
-                  {!isWhoqol && rule && cutoffs.filter((c) => c.domain_id === null).length > 0 && (
-                    <CutoffBar
-                      total={total}
-                      cutoffs={cutoffs.filter((c) => c.domain_id === null)}
-                      max={cutoffs.filter((c) => c.domain_id === null).reduce((m, c) => Math.max(m, c.max_score), 0)}
-                      instrumentCode={a.instrument?.code ?? ""}
-                    />
-                  )}
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Síntese da análise</p>
+                  <p className="mt-2 text-xl font-semibold">{totalHit.classification}</p>
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">{totalHit.message}</p>
                 </section>
               )}
 
@@ -216,7 +196,7 @@ function AssessmentDetail() {
                           <li key={d.id}>
                             <div className="mb-1 flex items-baseline justify-between text-sm">
                               <span className="font-medium">{d.name}</span>
-                              <span className="tabular-nums">{v !== undefined ? formatScore(v) : "-"}</span>
+                              <span className="text-xs text-muted-foreground">{domainPosition(d.id, computed.by_domain)}</span>
                             </div>
                             <div className="h-2 overflow-hidden rounded-full bg-surface-2">
                               <div
@@ -252,6 +232,33 @@ function AssessmentDetail() {
                   </div>
                 </section>
               )}
+
+              {responseDetails.length > 0 && (
+                <section className="overflow-hidden rounded-lg border border-border bg-background">
+                  <div className="border-b border-border p-6">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Dados detalhados da aplicação</p>
+                    <h2 className="mt-1 text-lg font-semibold">Respostas por item</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">Enunciados e alternativas efetivamente marcadas pelo respondente.</p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-surface-2 text-xs text-muted-foreground">
+                        <tr><th className="w-14 px-4 py-3">Item</th><th className="px-4 py-3">Pergunta</th><th className="px-4 py-3">Resposta</th><th className="px-4 py-3">Domínio</th></tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {responseDetails.map((item) => (
+                          <tr key={item.ordinal} className="align-top">
+                            <td className="px-4 py-4 tabular-nums text-muted-foreground">{item.ordinal}</td>
+                            <td className="max-w-xl px-4 py-4 leading-5">{item.question}</td>
+                            <td className="px-4 py-4 font-medium">{item.answer}</td>
+                            <td className="px-4 py-4 text-muted-foreground">{item.domain_name ?? "Geral"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
             </>
           ) : (
             <p className="rounded-lg border border-border bg-background p-6 text-sm text-muted-foreground">
@@ -268,6 +275,15 @@ function AssessmentDetail() {
 
 function formatScore(v: number): string {
   return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+function domainPosition(domainId: string, values?: Record<string, number>): string {
+  if (!values || values[domainId] === undefined) return "Sem dados";
+  const ranked = Object.entries(values).sort((a, b) => b[1] - a[1]);
+  if (ranked.length < 2) return "Analisado";
+  if (ranked[0]?.[0] === domainId) return "Mais preservado";
+  if (ranked[ranked.length - 1]?.[0] === domainId) return "Mais afetado";
+  return "Intermediário";
 }
 
 function formatFlag(f: string): string {

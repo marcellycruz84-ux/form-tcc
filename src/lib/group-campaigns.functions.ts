@@ -4,11 +4,16 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { writeAudit } from "@/lib/audit";
 import { enforceRateLimit, safeRequestIP } from "@/lib/rate-limit";
 import { computeScore, type EngineInstrument } from "@/lib/scoring/engine";
-import { buildInstrumentResponseDistribution, normalizeInstrumentSelection } from "@/lib/group-campaigns.utils";
+import {
+  buildInstrumentResponseDistribution,
+  normalizeInstrumentSelection,
+} from "@/lib/group-campaigns.utils";
 import type { Json } from "@/integrations/supabase/types";
 import { z } from "zod";
 
 type SupabaseClientLike = {
+  // Query builders vary by table; this adapter intentionally accepts the Supabase fluent API.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   from: (table: string) => any;
 };
 
@@ -23,7 +28,21 @@ type GroupResponseRow = {
   cutoff_hits: Json;
   severity_classification: string | null;
   flags: Json;
+  answers?: Json;
   submitted_at: string;
+};
+
+type OfficialAnalysis = {
+  code: string;
+  total?: number;
+  maximum?: number;
+  classification?: string | null;
+  interpretation?: string;
+  q9?: number;
+  depressive_screen?: boolean;
+  general_quality_of_life?: number;
+  health_satisfaction?: number;
+  domains?: Array<{ name: string; score_4_20: number; score_0_100: number }>;
 };
 
 // Instrumentos habilitados para modo grupo (triagens curtas).
@@ -88,11 +107,12 @@ async function getCampaignInstrumentDetails(
   instrumentIds: string[],
   fallbackInstrument?: { id: string; code: string; name: string } | null,
 ): Promise<CampaignInstrumentDetail[]> {
-  const orderedIds = instrumentIds.length > 0
-    ? instrumentIds
-    : fallbackInstrument?.id
-      ? [fallbackInstrument.id]
-      : [];
+  const orderedIds =
+    instrumentIds.length > 0
+      ? instrumentIds
+      : fallbackInstrument?.id
+        ? [fallbackInstrument.id]
+        : [];
   if (orderedIds.length === 0) return [];
 
   const { data, error } = await supabase
@@ -101,7 +121,9 @@ async function getCampaignInstrumentDetails(
     .in("id", orderedIds);
   if (error) throw new Error(error.message);
 
-  const byId = new Map((data ?? []).map((instrument: CampaignInstrumentDetail) => [instrument.id, instrument]));
+  const byId = new Map(
+    (data ?? []).map((instrument: CampaignInstrumentDetail) => [instrument.id, instrument]),
+  );
   return orderedIds
     .map((id) => byId.get(id))
     .filter((instrument): instrument is CampaignInstrumentDetail => Boolean(instrument));
@@ -113,7 +135,9 @@ async function listCampaignInstrumentDetails(
 ): Promise<Map<string, CampaignInstrumentDetail[]> | null> {
   const { data, error } = await supabase
     .from("group_campaign_instruments")
-    .select("campaign_id, display_order, instrument:instruments!group_campaign_instruments_instrument_id_fkey(id, code, name)")
+    .select(
+      "campaign_id, display_order, instrument:instruments!group_campaign_instruments_instrument_id_fkey(id, code, name)",
+    )
     .in("campaign_id", campaignIds)
     .order("display_order", { ascending: true });
   if (error) {
@@ -139,7 +163,9 @@ async function listGroupResponses(
 ): Promise<GroupResponseRow[]> {
   const withInstrument = await supabase
     .from("group_responses")
-    .select("id, instrument_id, respondent_name, academic_period, computed, cutoff_hits, severity_classification, flags, submitted_at")
+    .select(
+      "id, instrument_id, respondent_name, academic_period, answers, computed, cutoff_hits, severity_classification, flags, submitted_at",
+    )
     .eq("campaign_id", campaignId)
     .order("submitted_at", { ascending: false });
   if (!withInstrument.error) return withInstrument.data ?? [];
@@ -147,7 +173,9 @@ async function listGroupResponses(
 
   const legacy = await supabase
     .from("group_responses")
-    .select("id, respondent_name, computed, cutoff_hits, severity_classification, flags, submitted_at")
+    .select(
+      "id, respondent_name, answers, computed, cutoff_hits, severity_classification, flags, submitted_at",
+    )
     .eq("campaign_id", campaignId)
     .order("submitted_at", { ascending: false });
   if (legacy.error) throw new Error(legacy.error.message);
@@ -157,10 +185,7 @@ async function listGroupResponses(
   }));
 }
 
-async function insertGroupResponse(
-  supabase: SupabaseClientLike,
-  payload: Record<string, unknown>,
-) {
+async function insertGroupResponse(supabase: SupabaseClientLike, payload: Record<string, unknown>) {
   const { error } = await supabase.from("group_responses").insert(payload);
   if (!error) return;
   if (!isSchemaCacheMiss(error)) throw new Error(error.message);
@@ -173,10 +198,18 @@ async function insertGroupResponse(
 // ---------------- PROFISSIONAL ----------------
 
 const createSchema = z.object({
-  instrument_ids: z.union([z.string().uuid(), z.array(z.string().uuid())]).optional().nullable(),
+  instrument_ids: z
+    .union([z.string().uuid(), z.array(z.string().uuid())])
+    .optional()
+    .nullable(),
   title: z.string().trim().min(3).max(160),
   description: z.string().trim().max(2000).default(""),
-  consent_title: z.string().trim().min(3).max(200).default("Termo de Consentimento Livre e Esclarecido"),
+  consent_title: z
+    .string()
+    .trim()
+    .min(3)
+    .max(200)
+    .default("Termo de Consentimento Livre e Esclarecido"),
   consent_body: z.string().trim().min(20).max(20000),
   expires_at: z.string().datetime().optional().nullable(),
 });
@@ -187,9 +220,7 @@ export const createGroupCampaign = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
 
-    const instrumentIds = normalizeInstrumentSelection(
-      data.instrument_ids ?? null,
-    );
+    const instrumentIds = normalizeInstrumentSelection(data.instrument_ids ?? null);
 
     const { data: instruments, error: iErr } = await supabase
       .from("instruments")
@@ -199,7 +230,9 @@ export const createGroupCampaign = createServerFn({ method: "POST" })
       throw new Error("Um ou mais instrumentos não foram encontrados.");
     }
 
-    const invalid = instruments.filter((inst) => !GROUP_ELIGIBLE_CODES.includes(inst.code as typeof GROUP_ELIGIBLE_CODES[number]));
+    const invalid = instruments.filter(
+      (inst) => !GROUP_ELIGIBLE_CODES.includes(inst.code as (typeof GROUP_ELIGIBLE_CODES)[number]),
+    );
     if (invalid.length > 0) {
       throw new Error("Alguns instrumentos não estão habilitados para campanhas em grupo.");
     }
@@ -250,7 +283,9 @@ export const listGroupCampaigns = createServerFn({ method: "GET" })
     const { supabase, userId } = context;
     const { data, error } = await supabase
       .from("group_campaigns")
-      .select("id, title, description, is_active, expires_at, created_at, instrument:instruments!group_campaigns_instrument_id_fkey(id, code, name)")
+      .select(
+        "id, title, description, is_active, expires_at, created_at, instrument:instruments!group_campaigns_instrument_id_fkey(id, code, name)",
+      )
       .eq("professional_id", userId)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
@@ -261,7 +296,8 @@ export const listGroupCampaigns = createServerFn({ method: "GET" })
       listCampaignInstrumentDetails(supabase, ids),
     ]);
     const countMap = new Map<string, number>();
-    for (const r of counts ?? []) countMap.set(r.campaign_id, (countMap.get(r.campaign_id) ?? 0) + 1);
+    for (const r of counts ?? [])
+      countMap.set(r.campaign_id, (countMap.get(r.campaign_id) ?? 0) + 1);
     return data.map((c) => ({
       ...c,
       response_count: countMap.get(c.id) ?? 0,
@@ -271,6 +307,87 @@ export const listGroupCampaigns = createServerFn({ method: "GET" })
 
 const idSchema = z.object({ campaign_id: z.string().uuid() });
 
+function numericRecord(value: Json): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, number] => typeof entry[1] === "number",
+    ),
+  );
+}
+
+function buildOfficialAnalysis(
+  response: GroupResponseRow,
+  instrument: CampaignInstrumentDetail,
+  questions: Array<{ id: string; ordinal: number; domain_id: string | null }>,
+  options: Array<{ id: string; weight: number }>,
+  domains: Array<{ id: string; name: string }>,
+): OfficialAnalysis {
+  const computed =
+    response.computed && typeof response.computed === "object" && !Array.isArray(response.computed)
+      ? (response.computed as Record<string, Json>)
+      : {};
+  const total = typeof computed.total === "number" ? computed.total : undefined;
+  const selected = Array.isArray(response.answers) ? response.answers : [];
+  const optionWeights = new Map(options.map((option) => [option.id, Number(option.weight)]));
+  const questionOrdinals = new Map(questions.map((question) => [question.id, question.ordinal]));
+  const itemScores: Record<number, number> = {};
+  for (const rawAnswer of selected) {
+    if (!rawAnswer || typeof rawAnswer !== "object" || Array.isArray(rawAnswer)) continue;
+    const questionId = typeof rawAnswer.question_id === "string" ? rawAnswer.question_id : "";
+    const optionId = typeof rawAnswer.option_id === "string" ? rawAnswer.option_id : "";
+    const ordinal = questionOrdinals.get(questionId);
+    const weight = optionWeights.get(optionId);
+    if (ordinal !== undefined && weight !== undefined) itemScores[ordinal] = weight;
+  }
+
+  if (instrument.code === "GAD-7") {
+    return {
+      code: instrument.code,
+      total,
+      maximum: 21,
+      classification: response.severity_classification,
+      interpretation:
+        total !== undefined && total >= 10
+          ? "Indicação para avaliação clínica mais aprofundada; o resultado isolado não confirma diagnóstico."
+          : "Resultado de rastreio; interpretar em conjunto com entrevista e contexto clínico.",
+    };
+  }
+  if (instrument.code === "PHQ-9") {
+    const q9 = itemScores[9] ?? 0;
+    const positiveSymptoms =
+      Array.from({ length: 8 }, (_, index) => itemScores[index + 1] ?? 0).filter(
+        (score) => score >= 2,
+      ).length + (q9 > 0 ? 1 : 0);
+    const coreSymptom = (itemScores[1] ?? 0) >= 2 || (itemScores[2] ?? 0) >= 2;
+    return {
+      code: instrument.code,
+      total,
+      maximum: 27,
+      classification: response.severity_classification,
+      q9,
+      depressive_screen: positiveSymptoms >= 5 && coreSymptom,
+      interpretation:
+        q9 > 0
+          ? "A resposta à questão 9 requer avaliação clínica específica de segurança e risco."
+          : "Sem sinalização pela questão 9; o resultado continua sendo um rastreio, não um diagnóstico.",
+    };
+  }
+
+  const byDomain = numericRecord(computed.by_domain ?? null);
+  return {
+    code: instrument.code,
+    general_quality_of_life: itemScores[1],
+    health_satisfaction: itemScores[2],
+    domains: domains.map((domain) => {
+      const score100 = byDomain[domain.id] ?? 0;
+      return { name: domain.name, score_4_20: 4 + (score100 * 16) / 100, score_0_100: score100 };
+    }),
+    interpretation:
+      "Quanto maior o resultado, melhor a qualidade de vida percebida. A OMS não estabelece cortes universais para estes domínios.",
+  };
+}
+
 export const getGroupCampaignDetails = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => idSchema.parse(d))
@@ -278,7 +395,9 @@ export const getGroupCampaignDetails = createServerFn({ method: "POST" })
     const { supabase } = context;
     const { data: c, error } = await supabase
       .from("group_campaigns")
-      .select("id, title, description, is_active, expires_at, created_at, consent_title, consent_body, access_token_hash, instrument:instruments!group_campaigns_instrument_id_fkey(id, code, name)")
+      .select(
+        "id, title, description, is_active, expires_at, created_at, consent_title, consent_body, access_token_hash, instrument:instruments!group_campaigns_instrument_id_fkey(id, code, name)",
+      )
       .eq("id", data.campaign_id)
       .single();
     if (error || !c) throw new Error("Campanha não encontrada.");
@@ -286,6 +405,56 @@ export const getGroupCampaignDetails = createServerFn({ method: "POST" })
     const instrumentIds = (linkedInstruments ?? []).map((item) => item.instrument_id);
     const instruments = await getCampaignInstrumentDetails(supabase, instrumentIds, c.instrument);
     const responses = await listGroupResponses(supabase, data.campaign_id, c.instrument?.id);
+    const metadata = new Map<
+      string,
+      {
+        questions: Array<{ id: string; ordinal: number; domain_id: string | null }>;
+        options: Array<{ id: string; weight: number }>;
+        domains: Array<{ id: string; name: string }>;
+      }
+    >();
+    await Promise.all(
+      instruments.map(async (instrument) => {
+        const [{ data: questions }, { data: options }, { data: domains }] = await Promise.all([
+          supabase
+            .from("questions")
+            .select("id, ordinal, domain_id")
+            .eq("instrument_id", instrument.id),
+          supabase.from("options").select("id, weight").eq("instrument_id", instrument.id),
+          supabase.from("domains").select("id, name").eq("instrument_id", instrument.id),
+        ]);
+        metadata.set(instrument.id, {
+          questions: (questions ?? []).map(
+            (question: { id: string; ordinal: number; domain_id: string | null }) => ({
+              ...question,
+              ordinal: Number(question.ordinal),
+            }),
+          ),
+          options: (options ?? []).map((option: { id: string; weight: number }) => ({
+            ...option,
+            weight: Number(option.weight),
+          })),
+          domains: domains ?? [],
+        });
+      }),
+    );
+    const enrichedResponses = responses.map((response) => {
+      const instrument = instruments.find((item) => item.id === response.instrument_id);
+      const meta = response.instrument_id ? metadata.get(response.instrument_id) : undefined;
+      return {
+        ...response,
+        official_analysis:
+          instrument && meta
+            ? buildOfficialAnalysis(
+                response,
+                instrument,
+                meta.questions,
+                meta.options,
+                meta.domains,
+              )
+            : null,
+      };
+    });
     const instrumentDistribution = buildInstrumentResponseDistribution(responses, instruments);
     return {
       campaign: {
@@ -293,14 +462,16 @@ export const getGroupCampaignDetails = createServerFn({ method: "POST" })
         instruments,
         schema_fallback: linkedInstruments === null,
       },
-      responses,
+      responses: enrichedResponses,
       instrumentDistribution,
     };
   });
 
 export const toggleGroupCampaign = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) => z.object({ campaign_id: z.string().uuid(), is_active: z.boolean() }).parse(d))
+  .inputValidator((d: unknown) =>
+    z.object({ campaign_id: z.string().uuid(), is_active: z.boolean() }).parse(d),
+  )
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const { error } = await supabase
@@ -321,7 +492,14 @@ export const deleteGroupCampaign = createServerFn({ method: "POST" })
     const { supabase, userId } = context;
     const { error } = await supabase.from("group_campaigns").delete().eq("id", data.campaign_id);
     if (error) throw new Error(error.message);
-    await writeAudit(supabase, userId, "patient.soft_delete", "group_campaign", data.campaign_id, {});
+    await writeAudit(
+      supabase,
+      userId,
+      "patient.soft_delete",
+      "group_campaign",
+      data.campaign_id,
+      {},
+    );
     return { ok: true };
   });
 
@@ -337,17 +515,21 @@ export const getGroupCampaignByToken = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: c, error } = await supabaseAdmin
       .from("group_campaigns")
-      .select("id, title, description, is_active, expires_at, consent_title, consent_body, consent_version, instrument_id")
+      .select(
+        "id, title, description, is_active, expires_at, consent_title, consent_body, consent_version, instrument_id",
+      )
       .eq("access_token_hash", hashToken(data.token))
       .single();
     if (error || !c) throw new Error("Link inválido.");
     if (!c.is_active) throw new Error("Esta pesquisa está encerrada.");
-    if (c.expires_at && new Date(c.expires_at) < new Date()) throw new Error("Esta pesquisa expirou.");
+    if (c.expires_at && new Date(c.expires_at) < new Date())
+      throw new Error("Esta pesquisa expirou.");
 
     const linkInstruments = await getCampaignInstrumentLinks(supabaseAdmin, c.id);
 
     const instrumentIds = (linkInstruments ?? []).map((item) => item.instrument_id);
-    const effectiveInstrumentIds = instrumentIds.length > 0 ? instrumentIds : (c.instrument_id ? [c.instrument_id] : []);
+    const effectiveInstrumentIds =
+      instrumentIds.length > 0 ? instrumentIds : c.instrument_id ? [c.instrument_id] : [];
     if (effectiveInstrumentIds.length === 0) {
       throw new Error("Nenhum instrumento de avaliação foi encontrado para esta campanha.");
     }
@@ -355,9 +537,21 @@ export const getGroupCampaignByToken = createServerFn({ method: "POST" })
     const instrumentPayloads = await Promise.all(
       effectiveInstrumentIds.map(async (instrumentId) => {
         const [{ data: inst }, { data: questions }, { data: options }] = await Promise.all([
-          supabaseAdmin.from("instruments").select("id, code, name, description, instructions").eq("id", instrumentId).single(),
-          supabaseAdmin.from("questions").select("id, ordinal, text, is_inverted").eq("instrument_id", instrumentId).order("ordinal"),
-          supabaseAdmin.from("options").select("id, ordinal, label, weight, question_id").eq("instrument_id", instrumentId).order("ordinal"),
+          supabaseAdmin
+            .from("instruments")
+            .select("id, code, name, description, instructions")
+            .eq("id", instrumentId)
+            .single(),
+          supabaseAdmin
+            .from("questions")
+            .select("id, ordinal, text, is_inverted")
+            .eq("instrument_id", instrumentId)
+            .order("ordinal"),
+          supabaseAdmin
+            .from("options")
+            .select("id, ordinal, label, weight, question_id")
+            .eq("instrument_id", instrumentId)
+            .order("ordinal"),
         ]);
         return {
           id: inst!.id,
@@ -373,8 +567,12 @@ export const getGroupCampaignByToken = createServerFn({ method: "POST" })
     const primaryInstrument = instrumentPayloads[0];
     return {
       campaign: {
-        id: c.id, title: c.title, description: c.description,
-        consent_title: c.consent_title, consent_body: c.consent_body, consent_version: c.consent_version,
+        id: c.id,
+        title: c.title,
+        description: c.description,
+        consent_title: c.consent_title,
+        consent_body: c.consent_body,
+        consent_version: c.consent_version,
         instrument_ids: effectiveInstrumentIds,
         schema_fallback: linkInstruments === null,
       },
@@ -393,15 +591,19 @@ export const getGroupCampaignByToken = createServerFn({ method: "POST" })
 
 export const submitGroupResponse = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) =>
-    z.object({
-      token: z.string().min(20).max(80),
-      respondent_name: z.string().trim().min(3).max(160),
-      academic_period: z.string().trim().min(1, "Informe o período atual na faculdade.").max(50),
-      consent: z.object({ tcle_accepted: z.literal(true), lgpd_accepted: z.literal(true) }),
-      instrument_id: z.string().uuid(),
-      answers: z.array(z.object({ question_id: z.string().uuid(), option_id: z.string().uuid() })).min(1),
-      user_agent: z.string().max(500).default(""),
-    }).parse(d),
+    z
+      .object({
+        token: z.string().min(20).max(80),
+        respondent_name: z.string().trim().min(3).max(160),
+        academic_period: z.string().trim().min(1, "Informe o período atual na faculdade.").max(50),
+        consent: z.object({ tcle_accepted: z.literal(true), lgpd_accepted: z.literal(true) }),
+        instrument_id: z.string().uuid(),
+        answers: z
+          .array(z.object({ question_id: z.string().uuid(), option_id: z.string().uuid() }))
+          .min(1),
+        user_agent: z.string().max(500).default(""),
+      })
+      .parse(d),
   )
   .handler(async ({ data }) => {
     await guardPublic("public:group-submit", data.token, 20, 60_000);
@@ -415,30 +617,76 @@ export const submitGroupResponse = createServerFn({ method: "POST" })
       .single();
     if (!c) throw new Error("Link inválido.");
     if (!c.is_active) throw new Error("Esta pesquisa está encerrada.");
-    if (c.expires_at && new Date(c.expires_at) < new Date()) throw new Error("Esta pesquisa expirou.");
+    if (c.expires_at && new Date(c.expires_at) < new Date())
+      throw new Error("Esta pesquisa expirou.");
 
     const linkInstruments = await getCampaignInstrumentLinks(supabaseAdmin, c.id);
 
     const instrumentIds = (linkInstruments ?? []).map((item) => item.instrument_id);
-    const selectedInstrumentId = instrumentIds.includes(data.instrument_id) ? data.instrument_id : (instrumentIds[0] ?? c.instrument_id);
+    const selectedInstrumentId = instrumentIds.includes(data.instrument_id)
+      ? data.instrument_id
+      : (instrumentIds[0] ?? c.instrument_id);
 
-    const [{ data: instRow }, { data: qs }, { data: opts }, { data: rule }, { data: cutoffs }] = await Promise.all([
-      supabaseAdmin.from("instruments").select("id, code").eq("id", selectedInstrumentId).single(),
-      supabaseAdmin.from("questions").select("id, ordinal, is_inverted, domain_id").eq("instrument_id", selectedInstrumentId).order("ordinal"),
-      supabaseAdmin.from("options").select("id, ordinal, weight, question_id").eq("instrument_id", selectedInstrumentId),
-      supabaseAdmin.from("scoring_rules").select("aggregation, min_value, max_value, transform").eq("instrument_id", selectedInstrumentId).single(),
-      supabaseAdmin.from("cutoffs").select("min_score, max_score, classification, message, domain_id").eq("instrument_id", selectedInstrumentId),
-    ]);
+    const [{ data: instRow }, { data: qs }, { data: opts }, { data: rule }, { data: cutoffs }] =
+      await Promise.all([
+        supabaseAdmin
+          .from("instruments")
+          .select("id, code")
+          .eq("id", selectedInstrumentId)
+          .single(),
+        supabaseAdmin
+          .from("questions")
+          .select("id, ordinal, is_inverted, domain_id")
+          .eq("instrument_id", selectedInstrumentId)
+          .order("ordinal"),
+        supabaseAdmin
+          .from("options")
+          .select("id, ordinal, weight, question_id")
+          .eq("instrument_id", selectedInstrumentId),
+        supabaseAdmin
+          .from("scoring_rules")
+          .select("aggregation, min_value, max_value, transform")
+          .eq("instrument_id", selectedInstrumentId)
+          .single(),
+        supabaseAdmin
+          .from("cutoffs")
+          .select("min_score, max_score, classification, message, domain_id")
+          .eq("instrument_id", selectedInstrumentId),
+      ]);
     if (!instRow || !rule || !qs) throw new Error("Instrumento incompleto.");
     if (data.answers.length < qs.length) throw new Error("Responda todas as questões.");
 
-    const result = computeScore({
-      id: instRow.id, code: instRow.code,
-      questions: qs.map((q) => ({ id: q.id, ordinal: q.ordinal, is_inverted: q.is_inverted, domain_id: q.domain_id })),
-      options: (opts ?? []).map((o) => ({ id: o.id, ordinal: o.ordinal, weight: Number(o.weight) })),
-      rule: { aggregation: rule.aggregation, min_value: Number(rule.min_value), max_value: Number(rule.max_value), transform: rule.transform as EngineInstrument["rule"]["transform"] },
-      cutoffs: (cutoffs ?? []).map((cu) => ({ min_score: Number(cu.min_score), max_score: Number(cu.max_score), classification: cu.classification, message: cu.message, domain_id: cu.domain_id })),
-    }, data.answers);
+    const result = computeScore(
+      {
+        id: instRow.id,
+        code: instRow.code,
+        questions: qs.map((q) => ({
+          id: q.id,
+          ordinal: q.ordinal,
+          is_inverted: q.is_inverted,
+          domain_id: q.domain_id,
+        })),
+        options: (opts ?? []).map((o) => ({
+          id: o.id,
+          ordinal: o.ordinal,
+          weight: Number(o.weight),
+        })),
+        rule: {
+          aggregation: rule.aggregation,
+          min_value: Number(rule.min_value),
+          max_value: Number(rule.max_value),
+          transform: rule.transform as EngineInstrument["rule"]["transform"],
+        },
+        cutoffs: (cutoffs ?? []).map((cu) => ({
+          min_score: Number(cu.min_score),
+          max_score: Number(cu.max_score),
+          classification: cu.classification,
+          message: cu.message,
+          domain_id: cu.domain_id,
+        })),
+      },
+      data.answers,
+    );
 
     const severity = result.cutoff_hits.find((h) => h.scope === "total")?.classification ?? null;
 
@@ -446,7 +694,9 @@ export const submitGroupResponse = createServerFn({ method: "POST" })
     try {
       const { getRequestIP } = await import("@tanstack/react-start/server");
       ip = getRequestIP({ xForwardedFor: true }) ?? "unknown";
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     await insertGroupResponse(supabaseAdmin, {
       campaign_id: c.id,
